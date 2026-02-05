@@ -1,7 +1,13 @@
 <#
 .SYNOPSIS
-  DEV-only CI pipeline for building and validating a Windows installer.
+  DEV-only CI pipeline for building and validating a Windows installer
+  using MSBuild and InstallShield.
 #>
+
+param (
+    [string]$Configuration = "Release",
+    [string]$Environment   = "Dev"
+)
 
 # ==============================
 # Safety Settings
@@ -10,17 +16,15 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference   = "SilentlyContinue"
 
 # ==============================
-# Parameters
+# CI Detection
 # ==============================
-param (
-    [string]$Configuration = "Release",
-    [string]$Environment   = "Dev"
-)
+$IsCI = $env:GITHUB_ACTIONS -eq "true"
 
 Write-Host "========================================"
 Write-Host " DEV Installer Pipeline Started"
 Write-Host " Configuration : $Configuration"
 Write-Host " Environment   : $Environment"
+Write-Host " CI Mode       : $IsCI"
 Write-Host "========================================"
 
 # ==============================
@@ -35,6 +39,11 @@ $ServiceName         = "MyAppService"
 # ==============================
 # Helper Functions
 # ==============================
+function Write-Step {
+    param ([string]$Message)
+    Write-Host "`n=== $Message ==="
+}
+
 function Ensure-Path {
     param ([string]$Path)
     if (-not (Test-Path $Path)) {
@@ -42,33 +51,48 @@ function Ensure-Path {
     }
 }
 
-function Write-Step {
-    param ([string]$Message)
-    Write-Host "`n=== $Message ==="
-}
-
 # ==============================
-# STEP 1: Validate Inputs
+# STEP 1: Validate Required Files
 # ==============================
-Write-Step "Validating inputs"
+Write-Step "Validating required files"
 
 Ensure-Path $SolutionPath
 Ensure-Path $ISMPath
 Ensure-Path $InstallShieldPath
 
 # ==============================
-# STEP 2: Build Application
+# STEP 2: Validate MSBuild (CI only)
+# ==============================
+Write-Step "Validating MSBuild availability"
+
+if ($IsCI) {
+    if (-not (Get-Command msbuild -ErrorAction SilentlyContinue)) {
+        throw "MSBuild not found on CI runner"
+    }
+    Write-Host "MSBuild detected"
+}
+else {
+    Write-Host "Local execution detected — MSBuild check skipped"
+}
+
+# ==============================
+# STEP 3: Build Application (CI only)
 # ==============================
 Write-Step "Building application"
 
-msbuild $SolutionPath `
-    /p:Configuration=$Configuration `
-    /m
+if ($IsCI) {
+    msbuild $SolutionPath `
+        /p:Configuration=$Configuration `
+        /m
+}
+else {
+    Write-Host "Skipping MSBuild locally (corporate laptop)"
+}
 
 # ==============================
-# STEP 3: Build Installer
+# STEP 4: Build Installer (InstallShield)
 # ==============================
-Write-Step "Building installer (InstallShield)"
+Write-Step "Building installer using InstallShield"
 
 $IsCmd = Join-Path $InstallShieldPath "IsCmdBld.exe"
 Ensure-Path $IsCmd
@@ -79,7 +103,7 @@ Ensure-Path $IsCmd
     -c $Configuration
 
 # ==============================
-# STEP 4: Locate Installer
+# STEP 5: Locate Installer Output
 # ==============================
 Write-Step "Locating installer output"
 
@@ -91,48 +115,65 @@ if (-not $Installer) {
     throw "Installer EXE not found in $InstallerOutputPath"
 }
 
-Write-Host "Installer: $($Installer.FullName)"
+Write-Host "Installer found: $($Installer.FullName)"
 
 # ==============================
-# STEP 5: Silent Install Test
+# STEP 6: Silent Install Test (CI only)
 # ==============================
 Write-Step "Testing silent install"
 
-Start-Process $Installer.FullName `
-    -ArgumentList "/s /v`"/qn`"" `
-    -Wait
+if ($IsCI) {
+    Start-Process $Installer.FullName `
+        -ArgumentList "/s /v`"/qn`"" `
+        -Wait
 
-if ($LASTEXITCODE -ne 0) {
-    throw "Silent install failed with exit code $LASTEXITCODE"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Silent install failed with exit code $LASTEXITCODE"
+    }
+
+    Write-Host "Silent install succeeded"
+}
+else {
+    Write-Host "Skipping silent install locally"
 }
 
 # ==============================
-# STEP 6: Validate Installation
+# STEP 7: Validate Installation (CI only)
 # ==============================
 Write-Step "Validating installation"
 
-$service = Get-Service $ServiceName -ErrorAction SilentlyContinue
+if ($IsCI) {
+    $service = Get-Service $ServiceName -ErrorAction SilentlyContinue
 
-if (-not $service) {
-    throw "Validation failed: Service '$ServiceName' not found"
-}
+    if (-not $service) {
+        throw "Validation failed: Service '$ServiceName' not found"
+    }
 
-Write-Host "Service '$ServiceName' validated"
-
-# ==============================
-# STEP 7: Uninstall (Cleanup)
-# ==============================
-Write-Step "Uninstalling application"
-
-$product = Get-WmiObject Win32_Product |
-    Where-Object { $_.Name -like "MyApp*" }
-
-if ($product) {
-    $product.Uninstall() | Out-Null
-    Write-Host "Application uninstalled"
+    Write-Host "Service '$ServiceName' validated"
 }
 else {
-    Write-Host "Application not found (already clean)"
+    Write-Host "Skipping installation validation locally"
+}
+
+# ==============================
+# STEP 8: Uninstall (Cleanup - CI only)
+# ==============================
+Write-Step "Uninstalling application (cleanup)"
+
+if ($IsCI) {
+    $product = Get-WmiObject Win32_Product |
+        Where-Object { $_.Name -like "MyApp*" }
+
+    if ($product) {
+        $product.Uninstall() | Out-Null
+        Write-Host "Application uninstalled"
+    }
+    else {
+        Write-Host "Application not found (already clean)"
+    }
+}
+else {
+    Write-Host "Skipping uninstall locally"
 }
 
 # ==============================
